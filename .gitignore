@@ -1,0 +1,5 @@
+.stack-work/
+cacophony-wg.cabal
+tags
+stack.yaml.lock
+lib/

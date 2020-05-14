@@ -1,0 +1,163 @@
+diff --git a/package.yaml b/package.yaml
+index 9200525..b94fd11 100644
+--- a/package.yaml
++++ b/package.yaml
+@@ -1,6 +1,6 @@
+ name: cacophony
+ synopsis: A library implementing the Noise protocol.
+-version: 0.10.1
++version: 0.10.1.1
+ license: PublicDomain
+ license-file: LICENSE
+ maintainer: John Galt <jgalt@centromere.net>
+diff --git a/src/Crypto/Noise.hs b/src/Crypto/Noise.hs
+index 9bce28e..bd62337 100644
+--- a/src/Crypto/Noise.hs
++++ b/src/Crypto/Noise.hs
+@@ -28,8 +28,10 @@ module Crypto.Noise
+     -- * HandshakeOpts Setters
+   , setLocalEphemeral
+   , setLocalStatic
++  , setLocalStaticPart
+   , setRemoteEphemeral
+   , setRemoteStatic
++  , setRemoteStaticFull
+     -- * Classes
+   , Cipher
+   , DH
+diff --git a/src/Crypto/Noise/Internal/Handshake/Interpreter.hs b/src/Crypto/Noise/Internal/Handshake/Interpreter.hs
+index c06d55e..73cd6e1 100644
+--- a/src/Crypto/Noise/Internal/Handshake/Interpreter.hs
++++ b/src/Crypto/Noise/Internal/Handshake/Interpreter.hs
+@@ -1,4 +1,4 @@
+-{-# LANGUAGE RankNTypes, ScopedTypeVariables #-}
++{-# LANGUAGE RankNTypes, ScopedTypeVariables, LambdaCase #-}
+ ------------------------------------------------------------
+ -- |
+ -- Module      : Crypto.Noise.Internal.Handshake.Interpreter
+@@ -68,7 +68,7 @@ interpretToken opRole (S next) = do
+ 
+   if opRole == myRole then do
+     ss <- use hsSymmetricState
+-    (_, pk) <- getKeyPair hoLocalStatic LocalStatic
++    pk <- getPublicKey hoLocalStaticPub LocalStatic
+     (ct, ss') <- encryptAndHash (dhPubToBytes pk) ss
+     hsSymmetricState .= ss'
+     hsMsgBuffer      <>= cipherTextToBytes ct
+@@ -144,9 +144,17 @@ interpretToken _ (Se next) = do
+ -- [ SS ] -----------------------------------------------------------------------
+ 
+ interpretToken _ (Ss next) = do
+-  ~(sk, _) <- getKeyPair   hoLocalStatic  LocalStatic
+-  rpk      <- getPublicKey hoRemoteStatic RemoteStatic
+-  hsSymmetricState %= mixKey (dhPerform sk rpk)
++  -- test if we have full remote
++  use (hsOpts . hoRemoteStaticFull) >>= \case
++    Nothing -> do
++      ~(sk, _) <- getKeyPair   hoLocalStatic  LocalStatic
++      rpk      <- getPublicKey hoRemoteStatic RemoteStatic
++      hsSymmetricState %= mixKey (dhPerform sk rpk)
++    Just _ -> do
++      -- if we do, we're trying to kci someone, and don't have full local
++      rpk      <- getPublicKey hoLocalStaticPub   LocalStatic
++      ~(sk, _) <- getKeyPair   hoRemoteStaticFull RemoteStatic
++      hsSymmetricState %= mixKey (dhPerform sk rpk)
+ 
+   return next
+ 
+diff --git a/src/Crypto/Noise/Internal/Handshake/Pattern.hs b/src/Crypto/Noise/Internal/Handshake/Pattern.hs
+index ef978d4..dddcc12 100644
+--- a/src/Crypto/Noise/Internal/Handshake/Pattern.hs
++++ b/src/Crypto/Noise/Internal/Handshake/Pattern.hs
+@@ -10,7 +10,6 @@ module Crypto.Noise.Internal.Handshake.Pattern where
+ import Control.Applicative.Free
+ import Control.Lens
+ import Data.ByteString (ByteString)
+-import Data.Semigroup (Semigroup(..))
+ 
+ data Token next
+   = E   next
+diff --git a/src/Crypto/Noise/Internal/Handshake/State.hs b/src/Crypto/Noise/Internal/Handshake/State.hs
+index 96e9ab7..3bdab81 100644
+--- a/src/Crypto/Noise/Internal/Handshake/State.hs
++++ b/src/Crypto/Noise/Internal/Handshake/State.hs
+@@ -37,8 +37,10 @@ data HandshakeOpts d =
+                 , _hoPrologue            :: Plaintext
+                 , _hoLocalEphemeral      :: Maybe (KeyPair d)
+                 , _hoLocalStatic         :: Maybe (KeyPair d)
++                , _hoLocalStaticPub      :: Maybe (PublicKey d)
+                 , _hoRemoteEphemeral     :: Maybe (PublicKey d)
+                 , _hoRemoteStatic        :: Maybe (PublicKey d)
++                , _hoRemoteStaticFull    :: Maybe (KeyPair d)
+                 }
+ 
+ $(makeLenses ''HandshakeOpts)
+@@ -80,6 +82,8 @@ defaultHandshakeOpts r p =
+                 , _hoLocalStatic         = Nothing
+                 , _hoRemoteEphemeral     = Nothing
+                 , _hoRemoteStatic        = Nothing
++                , _hoLocalStaticPub      = Nothing
++                , _hoRemoteStaticFull    = Nothing
+                 }
+ 
+ -- | Sets the local ephemeral key.
+@@ -92,7 +96,12 @@ setLocalEphemeral k opts = opts { _hoLocalEphemeral = k }
+ setLocalStatic :: Maybe (KeyPair d)
+                -> HandshakeOpts d
+                -> HandshakeOpts d
+-setLocalStatic k opts = opts { _hoLocalStatic = k }
++setLocalStatic k opts = opts { _hoLocalStatic = k, _hoLocalStaticPub = snd <$> k }
++
++setLocalStaticPart :: Maybe (PublicKey d)
++               -> HandshakeOpts d
++               -> HandshakeOpts d
++setLocalStaticPart k opts = opts { _hoLocalStaticPub = k }
+ 
+ -- | Sets the remote ephemeral key (rarely needed).
+ setRemoteEphemeral :: Maybe (PublicKey d)
+@@ -101,11 +110,16 @@ setRemoteEphemeral :: Maybe (PublicKey d)
+ setRemoteEphemeral k opts = opts { _hoRemoteEphemeral = k }
+ 
+ -- | Sets the remote static key.
+-setRemoteStatic :: Maybe (PublicKey d)
++setRemoteStatic :: DH d => Maybe (PublicKey d)
+                 -> HandshakeOpts d
+                 -> HandshakeOpts d
+ setRemoteStatic k opts = opts { _hoRemoteStatic = k }
+ 
++setRemoteStaticFull :: Maybe (KeyPair d)
++                -> HandshakeOpts d
++                -> HandshakeOpts d
++setRemoteStaticFull k opts = opts { _hoRemoteStaticFull = k, _hoRemoteStatic = snd <$> k}
++
+ -- | Given a protocol name, returns the full handshake name according to the
+ --   rules in section 8.
+ mkHandshakeName :: forall c d h proxy. (Cipher c, DH d, Hash h)
+diff --git a/src/Crypto/Noise/Internal/Handshake/Validation.hs b/src/Crypto/Noise/Internal/Handshake/Validation.hs
+index 7174beb..5bf1587 100644
+--- a/src/Crypto/Noise/Internal/Handshake/Validation.hs
++++ b/src/Crypto/Noise/Internal/Handshake/Validation.hs
+@@ -58,9 +58,11 @@ data Inspection = Inspection
+   { _iInitESent    :: Bool
+   , _iInitSSent    :: Bool
+   , _iInitPSKSent  :: Bool
++  , _iInitRsSent   :: Bool
+   , _iRespESent    :: Bool
+   , _iRespSSent    :: Bool
+   , _iRespPSKSent  :: Bool
++  , _iRespRsSent   :: Bool
+   , _iInitRandReq  :: Bool
+   , _iInitRandDone :: Bool
+   , _iRespRandReq  :: Bool
+@@ -77,9 +79,11 @@ inspection = Inspection
+   { _iInitESent    = False
+   , _iInitSSent    = False
+   , _iInitPSKSent  = False
++  , _iInitRsSent   = False
+   , _iRespESent    = False
+   , _iRespSSent    = False
+   , _iRespPSKSent  = False
++  , _iRespRsSent   = False
+   , _iInitRandReq  = False
+   , _iInitRandDone = False
+   , _iRespRandReq  = False

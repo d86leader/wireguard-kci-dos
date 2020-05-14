@@ -1,0 +1,8 @@
+# resolver: lts-8.18
+resolver: lts-15.10
+packages:
+  - '.'
+extra-deps:
+  - 'lib/cacophony/'
+flags: {}
+extra-package-dbs: []
